@@ -13,6 +13,23 @@ import { startUpdate, updateStatus } from '../../lib/update-manager.mjs';
 
 export { getAppDataDir, listRecentConversations, resolveConversationId, parseSessionData, exportTranscript };
 
+export function buildRuntimeHealth({ health = {}, enabled = true, remoteSsh = false } = {}) {
+  const isEnabled = enabled !== false;
+  const healthy = Boolean(health.healthy);
+  const connected = Boolean(health.connected);
+  const compatibilityError = typeof health.compatibilityError === 'string' ? health.compatibilityError : '';
+  const runtimeReady = Boolean(healthy || !isEnabled || remoteSsh || (!connected && !compatibilityError));
+  return {
+    ...health,
+    healthy,
+    connected,
+    compatibilityError,
+    enabled: isEnabled,
+    mode: remoteSsh ? 'ssh-remote' : 'local',
+    runtimeReady
+  };
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const paths = installationPaths();
   const settings = createSettingsStore();
@@ -69,6 +86,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     onInstallUpdate: ({ version: expectedVersion } = {}) => startUpdate({ currentVersion: version, expectedVersion }),
     onUpdateStatus: () => updateStatus()
   }).catch(() => async () => {});
-  const close = await serveRuntime({ directory: join(paths.data, 'runtime'), version, stop, health: stop.health });
+  const close = await serveRuntime({
+    directory: join(paths.data, 'runtime'),
+    version,
+    stop,
+    health: async () => buildRuntimeHealth({ health: await stop.health(), enabled: settings.get().enabled !== false, remoteSsh })
+  });
   for (const event of ['SIGINT', 'SIGTERM']) process.on(event, async () => { await stop(); await closeWebUi(); await close(); process.exit(0); });
 }

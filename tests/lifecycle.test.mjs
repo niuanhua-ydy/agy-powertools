@@ -8,7 +8,8 @@ import {pathToFileURL} from 'node:url';
 import {collectPackage,writePackage,encodePackage,decodePackage,validatePackage,sha256,releaseName} from '../lib/package.mjs';
 import {installationPaths,installPlugin,uninstallPlugin,atomicJson} from '../lib/lifecycle.mjs';
 import {runUpdateJob,updateStatus,startUpdate} from '../lib/update-manager.mjs';
-import {serveRuntime,stopRuntimes,waitForRuntime,runtimeRecords} from '../lib/runtime-control.mjs';
+import {serveRuntime,stopRuntimes,waitForRuntime,runtimeRecords,isRuntimeReady} from '../lib/runtime-control.mjs';
+import {buildRuntimeHealth} from '../sidecars/inspector/main.mjs';
 
 const original=collectPackage(resolve('.')),stop=async()=>{};
 function variant(version){const copy=structuredClone(original);copy.version=version;for(const file of copy.files){
@@ -125,6 +126,30 @@ test('runtime shutdown uses a private local endpoint and never kills a process b
     assert.equal((await waitForRuntime(directory,original.version,{timeout:1000})).healthy,true);
     await stopRuntimes(directory,{purge:true});assert.equal(stopped,true);assert.equal(exited,true);assert.equal(runtimeRecords(directory).length,0);
   }finally{await close?.();s.clean();}
+});
+
+test('runtime readiness allows updates without debug port, while paused, or over SSH, but rejects broken connected runtimes',async()=>{
+  assert.equal(buildRuntimeHealth({health:{healthy:false,connected:false,compatibilityError:''},enabled:true,remoteSsh:false}).runtimeReady,true);
+  assert.equal(buildRuntimeHealth({health:{healthy:false,connected:true,compatibilityError:''},enabled:false,remoteSsh:false}).runtimeReady,true);
+  assert.equal(buildRuntimeHealth({health:{healthy:false,connected:false,compatibilityError:''},enabled:true,remoteSsh:true}).runtimeReady,true);
+  assert.equal(buildRuntimeHealth({health:{healthy:true,connected:true,compatibilityError:''},enabled:true,remoteSsh:false}).runtimeReady,true);
+  assert.equal(buildRuntimeHealth({health:{healthy:false,connected:true,compatibilityError:'missing binding'},enabled:true,remoteSsh:false}).runtimeReady,false);
+  assert.equal(buildRuntimeHealth({health:{healthy:false,connected:true,compatibilityError:''},enabled:true,remoteSsh:false}).runtimeReady,false);
+
+  assert.equal(isRuntimeReady({id:'agy-powertools',version:'2.14.0',healthy:false,runtimeReady:true},'2.14.0'),true);
+  assert.equal(isRuntimeReady({id:'agy-powertools',version:'2.14.0',healthy:false,runtimeReady:false},'2.14.0'),false);
+
+  const s=sandbox();let closeReady,closeBroken;try{
+    const directory=join(s.paths.data,'runtime');
+    closeReady=await serveRuntime({directory,version:newer.version,stop:async()=>{},health:async()=>buildRuntimeHealth({health:{healthy:false,connected:false},enabled:true,remoteSsh:false}),exit:()=>{}});
+    const status=await waitForRuntime(directory,newer.version,{timeout:1000});
+    assert.equal(status.runtimeReady,true);
+    assert.equal(status.healthy,false);
+    await closeReady();closeReady=null;
+
+    closeBroken=await serveRuntime({directory,version:newer.version,stop:async()=>{},health:async()=>buildRuntimeHealth({health:{healthy:false,connected:true,compatibilityError:'compat break'},enabled:true,remoteSsh:false}),exit:()=>{}});
+    await assert.rejects(()=>waitForRuntime(directory,newer.version,{timeout:400}),/新版本未能正常启动/);
+  }finally{await closeReady?.();await closeBroken?.();s.clean();}
 });
 
 test('Windows occupied working directories use verified file replacement and retain rollback support',{skip:process.platform!=='win32'},async()=>{

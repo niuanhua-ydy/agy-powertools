@@ -298,6 +298,8 @@ test('Sidecar Aux Pane Web UI serves post-update prompt copy, enforces token aut
     assert.ok(html.includes('需要重启 Antigravity 以启用 Powertools 插件'));
     assert.ok(html.includes('复制启动命令'));
     assert.ok(html.includes('检查插件更新'));
+    assert.ok(html.includes('更新完成，请点击上方「立即重启启用」以启用新版本。'));
+    assert.ok(html.includes('isStaleCompletedUpdate'));
     assert.ok(html.includes('复制诊断信息'));
     assert.ok(html.includes('id="mac-dock-hint"'));
     assert.ok(html.includes("data.platform === 'darwin'"));
