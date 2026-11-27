@@ -551,7 +551,9 @@ test('AccountSwitcher, Quotas, and Settings implement master switch risk warning
   assert.ok(listUi.find(listQuotas, 'agy-switch-account-acct-2'));
   assert.equal(listUi.find(listQuotas, 'agy-switch-account-acct-3'), null);
   const listText = listUi.collectText(listQuotas);
-  assert.ok(listText.indexOf('当前账号额度') < listText.indexOf('账号管理与切换'));
+  // Accounts are the primary content: no separate current-account block above the list.
+  assert.equal(listText.includes('当前账号额度'), false);
+  assert.equal(listUi.find(listQuotas, 'agy-setting-row-current-plan'), null);
   assert.ok(listText.includes('Argon'));
   assert.ok(listText.includes('Plus 1'));
   assert.ok(listText.includes('账号已禁用'));
@@ -2026,4 +2028,88 @@ test('ImportAccountsModal lists Antigravity Tools accounts, preselects only safe
   const pageText = ui.collectText(tree);
   assert.ok(pageText.includes('已导入账号: 2'));
   assert.ok(pageText.includes('导入失败: failed@example.com'));
+});
+
+test('Quotas page puts accounts first and shows each account quota in an expandable detail row', () => {
+  const now = Date.now();
+  const accountsData = {
+    activeId: 'acct-1',
+    vaultSupported: true,
+    accounts: [
+      { id: 'acct-1', email: 'alice@example.com', name: 'Alice Chen', tier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' }, hasCredential: true, disabled: false, syncedAtMs: now - 60_000, lastUsedAtMs: now - 60_000,
+        groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'g-5h', window: '5h', remainingFraction: 0.9, resetTimeMs: now + 3600_000 }] }] },
+      { id: 'acct-2', email: 'bob@example.com', name: 'Bob Lin', tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, hasCredential: true, disabled: false, syncedAtMs: now - 7_200_000, lastUsedAtMs: now - 7_200_000,
+        groups: [{ displayName: 'Gemini Models', buckets: [
+          { bucketId: 'g-5h', window: '5h', remainingFraction: 0.41, resetTimeMs: now + 1800_000 },
+          { bucketId: 'g-weekly', window: 'weekly', remainingFraction: 0.73, resetTimeMs: now + 3 * 86400_000 }
+        ] }] },
+      { id: 'acct-3', email: 'carol@example.com', name: 'Carol', tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, hasCredential: true, disabled: false, syncedAtMs: null, lastUsedAtMs: null, groups: [] }
+    ]
+  };
+  const liveAccount = {
+    groups: [{ displayName: 'Gemini Models', buckets: [
+      { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.35, resetTimeMs: now + 3600_000 },
+      { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.62, resetTimeMs: now + 4 * 86400_000 }
+    ] }]
+  };
+  const hooks = { account: liveAccount, capabilities: { plan: 'Google AI Ultra', planId: 'g1-ultra-tier', email: 'Alice@Example.com', name: 'Alice Chen' } };
+  const ui = createPanelHarness(accountsData, { multiAccount: true, accountViewMode: 'list' }, hooks);
+
+  let tree = ui.renderQuotas();
+  assert.equal(ui.find(tree, 'agy-setting-row-current-plan'), null);
+  assert.equal(ui.collectText(tree).includes('当前账号额度'), false);
+
+  // The active account is expanded by default and carries the live quota cards for both windows.
+  const liveDetail = ui.find(ui.find(tree, 'agy-account-detail-row-acct-1'), 'agy-account-detail-acct-1');
+  assert.equal(liveDetail.props['data-live'], 'true');
+  const liveText = ui.collectText(liveDetail);
+  for (const label of ['Gemini Models', '周限额', '5 小时限额', '35.0%', '62.0%']) assert.ok(liveText.includes(label), label);
+  assert.equal(liveText.includes('90'), false, 'stale snapshot must not leak into the live detail');
+  assert.equal(ui.find(tree, 'agy-expand-account-acct-1').props['aria-expanded'], 'true');
+  assert.equal(ui.find(tree, 'agy-account-row-acct-1').props['data-expanded'], 'true');
+
+  // Other accounts start collapsed and expand on demand to their last synced snapshot.
+  assert.equal(ui.find(tree, 'agy-account-detail-row-acct-2'), null);
+  assert.equal(ui.find(tree, 'agy-expand-account-acct-2').props['aria-expanded'], 'false');
+  ui.find(tree, 'agy-expand-account-acct-2').props.onClick();
+  ui.find(tree, 'agy-expand-account-acct-3').props.onClick();
+  tree = ui.renderQuotas();
+  const snapshotDetail = ui.find(tree, 'agy-account-detail-acct-2');
+  assert.equal(snapshotDetail.props['data-live'], undefined);
+  const snapshotText = ui.collectText(snapshotDetail);
+  for (const label of ['周限额', '5 小时限额', '41.0%', '73.0%', '更新于']) assert.ok(snapshotText.includes(label), label);
+  const emptyDetail = ui.find(tree, 'agy-account-detail-acct-3');
+  assert.equal(emptyDetail.props['data-empty'], 'true');
+  assert.ok(ui.collectText(emptyDetail).includes('尚无额度数据'));
+  assert.equal(ui.find(tree, 'agy-account-detail-row-acct-2').children[0].props.colSpan, 5);
+
+  // Collapsing is remembered per account, including for the active one.
+  ui.find(tree, 'agy-expand-account-acct-1').props.onClick();
+  ui.find(tree, 'agy-expand-account-acct-2').props.onClick();
+  tree = ui.renderQuotas();
+  assert.equal(ui.find(tree, 'agy-account-detail-row-acct-1'), null);
+  assert.equal(ui.find(tree, 'agy-account-detail-row-acct-2'), null);
+  assert.ok(ui.find(tree, 'agy-account-detail-row-acct-3'));
+
+  // Card view: the active card shows the live cards, other cards keep their snapshot boxes.
+  const cardUi = createPanelHarness(accountsData, { multiAccount: true, accountViewMode: 'card' }, hooks);
+  const cards = cardUi.renderQuotas();
+  assert.equal(cardUi.find(cards, 'agy-setting-row-current-plan'), null);
+  const activeCard = cardUi.find(cards, 'agy-account-card-acct-1');
+  assert.equal(cardUi.find(activeCard, 'agy-account-detail-acct-1').props['data-live'], 'true');
+  assert.ok(cardUi.collectText(activeCard).includes('35.0%'));
+  assert.ok(cardUi.collectText(cardUi.find(cards, 'agy-account-card-acct-2')).includes('41.0%'));
+
+  // Single-account mode keeps the classic subscription block.
+  const singleUi = createPanelHarness(accountsData, { multiAccount: false }, hooks);
+  const single = singleUi.renderQuotas();
+  assert.ok(singleUi.find(single, 'agy-setting-row-current-plan'));
+  assert.equal(singleUi.find(single, 'agy-accounts-overview'), null);
+  assert.ok(singleUi.collectText(single).includes('35.0%'));
+
+  // Until the active account is synced into the list, the live quota stays visible at the top.
+  const syncingUi = createPanelHarness({ activeId: '', vaultSupported: true, accounts: [] }, { multiAccount: true }, hooks);
+  const syncing = syncingUi.renderQuotas();
+  assert.ok(syncingUi.find(syncing, 'agy-setting-row-current-plan'));
+  assert.ok(syncingUi.collectText(syncing).includes('35.0%'));
 });
