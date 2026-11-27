@@ -8,7 +8,7 @@ import { checkForUpdates, compareVersions, createUpdateCheckStore, githubReposit
 test('release comparison uses version numbers and stable/prerelease ordering',()=>{
   assert.equal(compareVersions('v2.11.0','2.9.9'),1);assert.equal(compareVersions('2.11.0','2.11.0'),0);
   assert.equal(compareVersions('2.10.0','2.11.0'),-1);assert.equal(compareVersions('2.11.0','2.11.0-rc.1'),1);
-  assert.equal(compareVersions('2.11.0-rc.10','2.11.0-rc.2'),1);assert.equal(compareVersions('garbage','2.11.0'),null);
+  assert.equal(compareVersions('2.11.0-rc.10','2.11.0-rc.2'),1);assert.equal(compareVersions('2.16.10-fork.2','2.16.10-fork.1'),1);assert.equal(compareVersions('garbage','2.11.0'),null);
 });
 
 test('unconfigured or invalid repositories make no network request',async()=>{

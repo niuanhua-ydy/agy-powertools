@@ -229,3 +229,33 @@ test('release includes locale modules, static Windows relaunch scripts, and omit
   assert.ok(names.has('scripts/relaunch-antigravity.cmd'));
   assert.ok(![...names].some(name=>/^docs\/README_/.test(name)));
 });
+
+test('verified update installs prerelease fork versions cleanly', async () => {
+  const s = sandbox();
+  try {
+    await installPlugin({ bundle: older, home: s.home, stop });
+    const forkNext = variant('2.16.10-fork.2');
+    const bytes = encodePackage(forkNext);
+    const job = join(s.paths.data, 'jobs', 'fork-prerelease');
+    mkdirSync(job, { recursive: true });
+    const plan = {
+      format: 1,
+      home: s.home,
+      version: forkNext.version,
+      job,
+      asset: {
+        name: releaseName(forkNext.version),
+        url: `https://github.com/test/project/releases/download/v${forkNext.version}/${releaseName(forkNext.version)}`,
+        sha256: sha256(bytes)
+      }
+    };
+    await runUpdateJob(plan, {
+      fetcher: async () => new Response(bytes),
+      verify: async ({ paths, version }) => assert.equal(JSON.parse(readFileSync(join(paths.installed, 'plugin.json'))).version, version)
+    });
+    assert.equal(updateStatus(s.home).status, 'completed');
+    assert.equal(JSON.parse(readFileSync(join(s.paths.installed, 'plugin.json'))).version, '2.16.10-fork.2');
+  } finally {
+    s.clean();
+  }
+});
