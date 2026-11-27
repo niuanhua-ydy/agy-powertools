@@ -329,6 +329,8 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     refreshAccountCredentials: id => { hooks.onRefreshCredentials?.(id); return Promise.resolve({ ok: true }); },
     switchAccount: id => (hooks.switchAccountImpl ? hooks.switchAccountImpl(id) : Promise.resolve({ ok: true })),
     startAddAccount: alias => (hooks.startAddAccountImpl ? hooks.startAddAccountImpl(alias) : Promise.resolve({ ok: true })),
+    scanAccountImport: () => (hooks.scanAccountImportImpl ? hooks.scanAccountImportImpl() : Promise.resolve({ found: false, ready: true, accounts: [] })),
+    applyAccountImport: emails => (hooks.applyAccountImportImpl ? hooks.applyAccountImportImpl(emails) : Promise.resolve({ ok: true, imported: [], failed: [] })),
     loginSession: () => (hooks.loginSession ? hooks.loginSession() : { active: false, authUrl: '', mode: 'none' }),
     onLoginSessionChange: cb => (hooks.onLoginSessionChange ? hooks.onLoginSessionChange(cb) : () => {}),
     cancelAccountLogin: () => hooks.onCancelAccountLogin?.(),
@@ -1954,4 +1956,74 @@ test('Sidebar badge, QuickPopover info dot, and About toggles reflect discovered
   );
   assert.equal(dismissedUi.find(dismissedUi.renderSidebar(), 'agy-sidebar-update-badge'), null);
   assert.equal(dismissedUi.find(dismissedUi.renderQuickPopover(), 'agy-quick-trigger-badge'), null);
+});
+
+test('ImportAccountsModal lists Antigravity Tools accounts, preselects only safe ones, and imports the selection', async () => {
+  const effects = [];
+  const applied = [];
+  const accountsData = {
+    activeId: 'acct-a',
+    vaultSupported: true,
+    accounts: [{ id: 'acct-a', email: 'alpha@example.com', name: 'Alpha', hasCredential: true, disabled: false, groups: [] }]
+  };
+  const ui = createPanelHarness(accountsData, { enabled: true, multiAccount: true, language: 'zh-CN' }, {
+    useEffect: (fn, deps) => { if (Array.isArray(deps) && deps.length === 1 && deps[0] === true) effects.push(fn); },
+    scanAccountImportImpl: () => Promise.resolve({
+      source: 'antigravity-tools',
+      found: true,
+      ready: true,
+      accounts: [
+        { email: 'new@example.com', name: 'New Person', status: 'new' },
+        { email: 'banned@example.com', name: '', status: 'new', banned: true },
+        { email: 'alpha@example.com', name: 'Alpha', status: 'active' },
+        { email: 'kept@example.com', name: '', status: 'exists' },
+        { email: 'odd@example.com', name: '', status: 'mismatch' }
+      ]
+    }),
+    applyAccountImportImpl: emails => {
+      applied.push(emails);
+      return Promise.resolve({ ok: true, imported: emails.map(email => ({ id: `acct-${email[0]}`, email })), skipped: [], failed: [{ email: 'failed@example.com', error: 'x' }] });
+    }
+  });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+
+  let tree = ui.renderQuotas();
+  assert.equal(ui.find(tree, 'agy-import-accounts-dialog'), null);
+  ui.find(tree, 'agy-import-accounts').props.onClick();
+  tree = ui.renderQuotas();
+  assert.ok(ui.find(tree, 'agy-import-accounts-loading'));
+  assert.equal(ui.find(tree, 'agy-import-accounts-confirm').props.disabled, true);
+  for (const effect of effects.splice(0)) effect();
+  await settle();
+
+  tree = ui.renderQuotas();
+  const list = ui.find(tree, 'agy-import-accounts-list');
+  assert.ok(list);
+  const rows = ui.findAll(list, n => n.type === 'label');
+  const boxOf = row => ui.findAll(row, n => n.type === 'input')[0].props;
+  assert.deepEqual(rows.map(row => [row.props['data-status'], boxOf(row).checked, boxOf(row).disabled]), [
+    ['new', true, false],
+    ['new', false, false],
+    ['active', false, true],
+    ['exists', false, true],
+    ['mismatch', false, true]
+  ]);
+  const listText = ui.collectText(list);
+  for (const label of ['new@example.com', 'New Person', '可导入', '已封禁', '当前账号', '已添加', '邮箱不一致']) assert.ok(listText.includes(label), label);
+  assert.doesNotMatch(ui.collectText(ui.find(tree, 'agy-import-accounts-dialog')), /[\u00b7\u2022\u2027\u30fb]/u);
+  assert.equal(ui.find(tree, 'agy-import-accounts-confirm').props.disabled, false);
+
+  // A banned account is never preselected but can be opted in explicitly; locked rows cannot.
+  boxOf(rows[1]).onChange({ target: { checked: true } });
+  boxOf(rows[2]).onChange({ target: { checked: true } });
+  tree = ui.renderQuotas();
+  ui.find(tree, 'agy-import-accounts-confirm').props.onClick();
+  await settle();
+  assert.deepEqual(applied, [['new@example.com', 'banned@example.com']]);
+
+  tree = ui.renderQuotas();
+  assert.equal(ui.find(tree, 'agy-import-accounts-dialog'), null);
+  const pageText = ui.collectText(tree);
+  assert.ok(pageText.includes('已导入账号: 2'));
+  assert.ok(pageText.includes('导入失败: failed@example.com'));
 });
