@@ -294,7 +294,7 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     mT: 'select-menu',
     nT: 'select-item'
   });
-  vm.runInContext(`(() => { ${dashboardCode}\n${helperCode}\nglobalThis.__agyDashboard = { modelIdentity, timestampToMs, resolveWeeklyQuotaWindow, dateRange, summarizeRequests, subscriptionIdentity, distributionModels }; globalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, formatRelativeTime, formatResetCountdown, formatCompactCountdown, accountInitials, selectAutoSwitchCandidate }; })();`, context);
+  vm.runInContext(`(() => { ${dashboardCode}\n${helperCode}\nglobalThis.__agyDashboard = { modelIdentity, timestampToMs, resolveWeeklyQuotaWindow, dateRange, summarizeRequests, subscriptionIdentity, distributionModels }; globalThis.__agyAccounts = { quotaGroupMeta, accountBucketStatus, summarizeAccountQuota, formatRelativeTime, formatResetCountdown, formatCompactCountdown, accountInitials, selectAutoSwitchCandidate, accountNeonSupport }; })();`, context);
   vm.runInContext(panelsCode, context);
   const currentOpts = { enabled: true, language: 'zh-CN', overviewRange: 'weeklyQuota', titlebarQuickPanel: true, multiAccount: true, accountSwitcher: true, accountViewMode: 'list', accountQuotaWindow: '5h', autoSwitchAccount: false, proxyEnabled: false, ...opts };
   const panels = context.__agyPanels({
@@ -331,6 +331,7 @@ function createPanelHarness(accountsData, opts = {}, hooks = {}) {
     startAddAccount: alias => (hooks.startAddAccountImpl ? hooks.startAddAccountImpl(alias) : Promise.resolve({ ok: true })),
     scanAccountImport: () => (hooks.scanAccountImportImpl ? hooks.scanAccountImportImpl() : Promise.resolve({ found: false, ready: true, accounts: [] })),
     applyAccountImport: emails => (hooks.applyAccountImportImpl ? hooks.applyAccountImportImpl(emails) : Promise.resolve({ ok: true, imported: [], failed: [] })),
+    syncAccountImportModels: () => (hooks.syncAccountImportModelsImpl ? hooks.syncAccountImportModelsImpl() : Promise.resolve({ ok: true, updated: [] })),
     loginSession: () => (hooks.loginSession ? hooks.loginSession() : { active: false, authUrl: '', mode: 'none' }),
     onLoginSessionChange: cb => (hooks.onLoginSessionChange ? hooks.onLoginSessionChange(cb) : () => {}),
     cancelAccountLogin: () => hooks.onCancelAccountLogin?.(),
@@ -2112,4 +2113,132 @@ test('Quotas page puts accounts first and shows each account quota in an expanda
   const syncing = syncingUi.renderQuotas();
   assert.ok(syncingUi.find(syncing, 'agy-setting-row-current-plan'));
   assert.ok(syncingUi.collectText(syncing).includes('35.0%'));
+});
+
+test('Neon model availability persists in store and renders badges and filters across account views', async () => {
+  const { accountNeonSupport } = await import('../lib/account-helpers.mjs');
+  assert.equal(accountNeonSupport({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, availableModels: ['gemini-4-neon-high', 'gemini-4-hydrogen-high'] }), 'supported');
+  assert.equal(accountNeonSupport({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, availableModels: ['Gemini 4 Neon (High)'] }), 'supported');
+  assert.equal(accountNeonSupport({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, availableModels: ['gemini-pro-orchestrator-neon'] }), 'supported');
+  assert.equal(accountNeonSupport({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, availableModels: ['gemini-4-hydrogen-high', 'claude-opus-4-6-thinking'] }), 'unsupported');
+  assert.equal(accountNeonSupport({ tier: { id: 'g1-free-tier', name: 'Free' } }), 'unsupported');
+  assert.equal(accountNeonSupport({ tier: { id: 'g1-pro-tier', name: 'Google AI Pro' } }), 'unknown');
+
+  const dir = mkdtempSync(join(tmpdir(), 'agy-neon-persist-'));
+  try {
+    const vault = createFakeVault({ 'gemini:antigravity': 'tok-a' });
+    const store = createAccountsStore(dir, { vault, appStoragePath: '' });
+    store.syncActive({ email: 'a@example.com', tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, availableModels: ['gemini-4-neon-high', 'gemini-4-hydrogen-high'] });
+    const reloaded = createAccountsStore(dir, { vault, appStoragePath: '' });
+    assert.deepEqual(reloaded.list().accounts[0].availableModels, ['gemini-4-neon-high', 'gemini-4-hydrogen-high']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const now = Date.now();
+  const accountsData = {
+    activeId: 'acct-1',
+    vaultSupported: true,
+    accounts: [
+      { id: 'acct-1', email: 'active@example.com', name: 'Active Pro', tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, hasCredential: true, disabled: false, groups: [], syncedAtMs: now },
+      { id: 'acct-2', email: 'noneon@example.com', name: 'NoNeon Pro', tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, availableModels: ['gemini-4-hydrogen-high'], hasCredential: true, disabled: false, groups: [], syncedAtMs: now },
+      { id: 'acct-3', email: 'unknown@example.com', name: 'Pending Pro', tier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, hasCredential: true, disabled: false, groups: [], syncedAtMs: null }
+    ]
+  };
+  const hooks = {
+    capabilities: {
+      email: 'active@example.com',
+      name: 'Active Pro',
+      plan: 'Google AI Pro',
+      planId: 'g1-pro-tier',
+      models: [{ modelId: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)' }]
+    }
+  };
+  const ui = createPanelHarness(accountsData, { multiAccount: true, accountViewMode: 'list' }, hooks);
+  let tree = ui.renderQuotas();
+  assert.equal(ui.find(ui.find(tree, 'agy-account-row-acct-1'), 'agy-account-neon-badge').props['data-neon'], 'supported');
+  assert.equal(ui.find(ui.find(tree, 'agy-account-row-acct-2'), 'agy-account-neon-badge').props['data-neon'], 'unsupported');
+  assert.equal(ui.find(ui.find(tree, 'agy-account-row-acct-3'), 'agy-account-neon-badge').props['data-neon'], 'unknown');
+  const neonTabs = ui.find(tree, 'agy-account-neon-tabs');
+  assert.ok(ui.collectText(neonTabs).includes('Neon 1'));
+  assert.ok(ui.collectText(neonTabs).includes('无 Neon 1'));
+  assert.doesNotMatch(ui.collectText(tree), /[\u00b7\u2022\u2027\u30fb]/u);
+
+  // Filter by supported / unsupported
+  const buttons = ui.findAll(neonTabs, n => n.type === 'button');
+  buttons[1].props.onClick();
+  tree = ui.renderQuotas();
+  assert.ok(ui.find(tree, 'agy-account-row-acct-1'));
+  assert.equal(ui.find(tree, 'agy-account-row-acct-2'), null);
+  assert.equal(ui.find(tree, 'agy-account-row-acct-3'), null);
+
+  buttons[2].props.onClick();
+  tree = ui.renderQuotas();
+  assert.equal(ui.find(tree, 'agy-account-row-acct-1'), null);
+  assert.ok(ui.find(tree, 'agy-account-row-acct-2'));
+  assert.equal(ui.find(tree, 'agy-account-row-acct-3'), null);
+
+  // Switcher trigger and popover show Neon / No Neon pills and hide unknown pills
+  let sw = ui.renderSwitcher();
+  const swTrigger = ui.find(sw, 'agy-account-switcher-trigger');
+  assert.equal(ui.find(swTrigger, 'agy-account-neon-badge').props['data-neon'], 'supported');
+  swTrigger.props.onClick();
+  sw = ui.renderSwitcher();
+  assert.equal(ui.find(ui.find(sw, 'agy-account-row-acct-1'), 'agy-account-neon-badge').props['data-neon'], 'supported');
+  assert.equal(ui.find(ui.find(sw, 'agy-account-row-acct-2'), 'agy-account-neon-badge').props['data-neon'], 'unsupported');
+  assert.equal(ui.find(ui.find(sw, 'agy-account-row-acct-3'), 'agy-account-neon-badge'), null);
+
+  // Card view shows all 3 badges as well
+  const cardUi = createPanelHarness(accountsData, { multiAccount: true, accountViewMode: 'card' }, hooks);
+  const cards = cardUi.renderQuotas();
+  assert.equal(cardUi.find(cardUi.find(cards, 'agy-account-card-acct-1'), 'agy-account-neon-badge').props['data-neon'], 'supported');
+  assert.equal(cardUi.find(cardUi.find(cards, 'agy-account-card-acct-2'), 'agy-account-neon-badge').props['data-neon'], 'unsupported');
+  assert.equal(cardUi.find(cardUi.find(cards, 'agy-account-card-acct-3'), 'agy-account-neon-badge').props['data-neon'], 'unknown');
+});
+
+test('ImportAccountsModal shows Neon badges and syncs missing models for existing accounts', async () => {
+  const effects = [];
+  let syncCalled = 0;
+  const accountsData = {
+    activeId: 'acct-a',
+    vaultSupported: true,
+    accounts: [{ id: 'acct-a', email: 'alpha@example.com', name: 'Alpha', hasCredential: true, disabled: false, groups: [] }]
+  };
+  const ui = createPanelHarness(accountsData, { enabled: true, multiAccount: true, language: 'zh-CN' }, {
+    useEffect: (fn, deps) => { if (Array.isArray(deps) && deps.length === 1 && deps[0] === true) effects.push(fn); },
+    scanAccountImportImpl: () => Promise.resolve({
+      source: 'antigravity-tools',
+      found: true,
+      ready: true,
+      accounts: [
+        { email: 'neon@example.com', name: 'Neon', status: 'new', availableModels: ['gemini-4-neon-high'] },
+        { email: 'old@example.com', name: 'Old', status: 'exists', missingModels: true, availableModels: ['gemini-4-hydrogen-high'] }
+      ]
+    }),
+    syncAccountImportModelsImpl: () => {
+      syncCalled++;
+      return Promise.resolve({ ok: true, updated: [{ id: 'acct-old', email: 'old@example.com' }] });
+    }
+  });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  let tree = ui.renderQuotas();
+  ui.find(tree, 'agy-import-accounts').props.onClick();
+  tree = ui.renderQuotas();
+  assert.ok(ui.find(tree, 'agy-import-accounts-loading'));
+  for (const effect of effects.splice(0)) effect();
+  await settle();
+
+  tree = ui.renderQuotas();
+  const list = ui.find(tree, 'agy-import-accounts-list');
+  const badges = ui.findAll(list, n => n.props?.['data-testid'] === 'agy-account-neon-badge');
+  assert.deepEqual(badges.map(b => b.props['data-neon']), ['supported', 'unsupported']);
+
+  const syncBtn = ui.find(tree, 'agy-import-sync-models');
+  assert.ok(syncBtn);
+  syncBtn.props.onClick();
+  await settle();
+  assert.equal(syncCalled, 1);
+  tree = ui.renderQuotas();
+  assert.equal(ui.find(tree, 'agy-import-accounts-dialog'), null);
+  assert.ok(ui.collectText(tree).includes('已同步账号模型: 1'));
 });

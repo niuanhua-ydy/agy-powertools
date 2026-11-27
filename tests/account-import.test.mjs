@@ -7,6 +7,7 @@ import {
   antigravityToolsDir,
   buildCredentialPayload,
   loadAntigravityToolsEntries,
+  loadAntigravityToolsModels,
   scanAntigravityTools
 } from '../lib/account-import.mjs';
 import { createCredentialVault, extractCredentialEmail, GO_KEYRING_BASE64_PREFIX } from '../lib/credential-vault.mjs';
@@ -326,5 +327,68 @@ test('accounts.importAccounts fails closed when the vault write fails or stores 
     assert.throws(() => noImport.importAccounts([{ email: 'x@example.com', payload: payloadFor('x@example.com') }]), /不支持导入/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('account-import extracts quota.models for Neon detection without exposing tokens and backfills missing account models', () => {
+  const dir = makeToolsDir([
+    toolsRecord('a', 'alpha@example.com', {
+      quota: {
+        subscription_tier: 'PRO',
+        raw_tier: 'g1-pro-tier',
+        models: [{ name: 'gemini-4-neon-high' }, { id: 'gemini-4-hydrogen-high' }, 'claude-opus-5-5-high']
+      }
+    }),
+    toolsRecord('b', 'beta@example.com', {
+      quota: {
+        subscription_tier: 'PRO',
+        raw_tier: 'g1-pro-tier',
+        models: [{ name: 'gemini-4-hydrogen-high' }, { name: 'claude-opus-4-6-thinking' }]
+      }
+    }),
+    toolsRecord('c', 'bad@example.com', {
+      token: { email: 'someone-else@example.com' },
+      quota: { subscription_tier: 'PRO', raw_tier: 'g1-pro-tier', models: [{ name: 'gemini-4-neon-high' }] }
+    })
+  ]);
+  const storeDir = mkdtempSync(join(tmpdir(), 'agy-accounts-models-'));
+  try {
+    const scan = scanAntigravityTools(dir);
+    assert.deepEqual(scan.accounts.find(a => a.email === 'alpha@example.com').availableModels, [
+      'gemini-4-neon-high',
+      'gemini-4-hydrogen-high',
+      'claude-opus-5-5-high'
+    ]);
+    assert.doesNotMatch(JSON.stringify(scan), /ACCESS-|REFRESH-/);
+
+    const models = loadAntigravityToolsModels(dir);
+    assert.deepEqual(models, [
+      { email: 'alpha@example.com', availableModels: ['gemini-4-neon-high', 'gemini-4-hydrogen-high', 'claude-opus-5-5-high'] },
+      { email: 'beta@example.com', availableModels: ['gemini-4-hydrogen-high', 'claude-opus-4-6-thinking'] }
+    ]);
+
+    const entries = loadAntigravityToolsEntries(dir, ['alpha@example.com'], { now: 1_795_000_000_000 });
+    assert.deepEqual(entries[0].availableModels, ['gemini-4-neon-high', 'gemini-4-hydrogen-high', 'claude-opus-5-5-high']);
+
+    const vault = createFakeVault({ liveEmail: 'live@example.com' });
+    const store = createAccountsStore(storeDir, { now: () => 1_795_000_000_000, vault, appStoragePath: '' });
+    store.syncActive({ email: 'live@example.com', availableModels: ['gemini-4-neon-low'] });
+    const payloadFor = email => buildCredentialPayload({ email, refreshToken: `rt-${email}` }, { now: 1_795_000_000_000 });
+    store.importAccounts([{ email: 'beta@example.com', payload: payloadFor('beta@example.com') }]);
+
+    // Existing account without models gets backfilled; active account with live models is untouched.
+    const status = store.importStatus(scan.accounts);
+    assert.equal(status.accounts.find(a => a.email === 'beta@example.com').missingModels, true);
+    const synced = store.syncImportedModels([
+      ...models,
+      { email: 'live@example.com', availableModels: ['gemini-4-hydrogen-low'] }
+    ]);
+    assert.deepEqual(synced.updated.map(u => u.email), ['beta@example.com']);
+    assert.deepEqual(synced.accounts.find(a => a.email === 'beta@example.com').availableModels, ['gemini-4-hydrogen-high', 'claude-opus-4-6-thinking']);
+    assert.deepEqual(synced.accounts.find(a => a.email === 'live@example.com').availableModels, ['gemini-4-neon-low']);
+    assert.equal(store.importStatus(scan.accounts).accounts.find(a => a.email === 'beta@example.com').missingModels, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(storeDir, { recursive: true, force: true });
   }
 });
